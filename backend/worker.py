@@ -1,10 +1,27 @@
-from playwright.sync_api import sync_playwright
-from playwright_stealth import stealth_sync
 from concurrent.futures import ThreadPoolExecutor
+import random
+import time
+
+from playwright.sync_api import sync_playwright
+
 from database import SessionLocal
-from models import Company, Job
 from extractor import extract_company
-import time, random
+from models import Company, Job
+
+try:
+    # Newer playwright-stealth versions expose a Stealth class.
+    from playwright_stealth import Stealth
+
+    _stealth = Stealth()
+
+    def apply_stealth(page):
+        _stealth.apply_stealth_sync(page)
+except ImportError:
+    # Backward compatibility with older releases.
+    from playwright_stealth import stealth_sync
+
+    def apply_stealth(page):
+        stealth_sync(page)
 
 
 # -----------------------
@@ -12,6 +29,7 @@ import time, random
 # -----------------------
 def human_delay():
     time.sleep(random.uniform(2, 5))
+
 
 def human_scroll(page):
     page.mouse.wheel(0, random.randint(1000, 3000))
@@ -24,7 +42,7 @@ def human_scroll(page):
 def scrape_single(browser, url):
     try:
         page = browser.new_page()
-        stealth_sync(page)
+        apply_stealth(page)
 
         page.goto(url, timeout=60000)
         page.wait_for_load_state("networkidle")
@@ -58,11 +76,11 @@ def run_scraper(job_id, sales_nav_url):
         browser = p.chromium.launch_persistent_context(
             "./session",
             headless=False,
-            args=["--disable-blink-features=AutomationControlled"]
+            args=["--disable-blink-features=AutomationControlled"],
         )
 
         page = browser.new_page()
-        stealth_sync(page)
+        apply_stealth(page)
 
         page.goto(sales_nav_url)
         page.wait_for_load_state("networkidle")
@@ -78,7 +96,7 @@ def run_scraper(job_id, sales_nav_url):
                 link = card.query_selector("a")
                 if link:
                     urls.append(link.get_attribute("href"))
-            except:
+            except Exception:
                 continue
 
         print("TOTAL URLS:", len(urls))
