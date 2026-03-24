@@ -31,7 +31,7 @@ async def start_job(payload: dict):
 
 
 async def run_async(job_id, url):
-    run_scraper(job_id, url)
+    await asyncio.to_thread(run_scraper, job_id, url)
 
 
 @app.get("/job/{job_id}")
