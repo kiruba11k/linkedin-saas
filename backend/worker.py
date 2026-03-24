@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import os
 import random
 import time
 
@@ -71,48 +72,59 @@ def run_scraper(job_id, sales_nav_url):
     job.status = "running"
     db.commit()
 
-    with sync_playwright() as p:
+    try:
+        with sync_playwright() as p:
 
-        browser = p.chromium.launch_persistent_context(
-            "./session",
-            headless=False,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
+            browser = p.chromium.launch_persistent_context(
+                "./session",
+                headless=os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true",
+                args=["--disable-blink-features=AutomationControlled"],
+            )
 
-        page = browser.new_page()
-        apply_stealth(page)
+            page = browser.new_page()
+            apply_stealth(page)
 
-        page.goto(sales_nav_url)
-        page.wait_for_load_state("networkidle")
-        page.wait_for_timeout(5000)
+            page.goto(sales_nav_url, timeout=60000)
+            page.wait_for_load_state("networkidle")
+            page.wait_for_timeout(5000)
 
-        human_scroll(page)
+            human_scroll(page)
 
-        cards = page.query_selector_all("li")
+            cards = page.query_selector_all("li")
 
-        urls = []
-        for card in cards[:10]:
-            try:
-                link = card.query_selector("a")
-                if link:
-                    urls.append(link.get_attribute("href"))
-            except Exception:
-                continue
+            urls = []
+            for card in cards[:10]:
+                try:
+                    link = card.query_selector("a")
+                    if link:
+                        href = link.get_attribute("href")
+                        if href and "linkedin.com" in href:
+                            urls.append(href)
+                except Exception:
+                    continue
 
-        print("TOTAL URLS:", len(urls))
+            # Deduplicate while preserving order.
+            urls = list(dict.fromkeys(urls))
 
-        # 🔥 PARALLEL SCRAPING
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [executor.submit(scrape_single, browser, url) for url in urls]
+            print("TOTAL URLS:", len(urls))
 
-            for future in futures:
-                result = future.result()
-                if result:
-                    db.add(Company(job_id=job_id, **result))
-                    db.commit()
+            # 🔥 PARALLEL SCRAPING
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                futures = [executor.submit(scrape_single, browser, url) for url in urls]
 
-        browser.close()
+                for future in futures:
+                    result = future.result()
+                    if result:
+                        db.add(Company(job_id=job_id, **result))
+                        db.commit()
 
-    job.status = "completed"
-    db.commit()
-    db.close()
+            browser.close()
+
+        job.status = "completed"
+        db.commit()
+    except Exception as e:
+        print("SCRAPER JOB FAILED:", e)
+        job.status = "failed"
+        db.commit()
+    finally:
+        db.close()
