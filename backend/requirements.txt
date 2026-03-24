@@ -3,4 +3,5 @@ uvicorn
 sqlalchemy
 psycopg2-binary
 playwright
+playwright-stealth
 python-dotenv
