@@ -50,6 +50,7 @@ def get_job(job_id: str):
 
     return {
         "status": job.status,
+        "result_count": len(companies),
         "results": [c.__dict__ for c in companies],
     }
 
