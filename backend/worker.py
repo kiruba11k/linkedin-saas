@@ -129,6 +129,37 @@ def collect_company_urls(page, max_results=25):
     return deduped[:max_results]
 
 
+def detect_access_issue(page):
+    """
+    Best-effort detection for common LinkedIn access blocks that lead to empty scraping results.
+    Returns a human-readable reason string, or None when page appears accessible.
+    """
+    try:
+        current_url = (page.url or "").lower()
+    except Exception:
+        current_url = ""
+
+    try:
+        html = page.content().lower()
+    except Exception:
+        html = ""
+
+    if "linkedin.com/login" in current_url or "/checkpoint/" in current_url:
+        return "LinkedIn redirected to login/checkpoint page."
+
+    block_markers = [
+        "sign in",
+        "join now",
+        "security verification",
+        "let's do a quick security check",
+        "captcha",
+    ]
+    if any(marker in html for marker in block_markers):
+        return "LinkedIn page appears to require authentication or verification."
+
+    return None
+
+
 # -----------------------
 # SCRAPE ONE COMPANY
 # -----------------------
@@ -191,12 +222,24 @@ def run_scraper(job_id, sales_nav_url):
 
             human_scroll(page, loops=2)
 
+            access_issue = detect_access_issue(page)
+            if access_issue:
+                print(f"SCRAPER ACCESS ISSUE: {access_issue}")
+                job.status = "failed"
+                db.commit()
+                context.close()
+                return
+
             urls = collect_company_urls(page, max_results=25)
             print("TOTAL COMPANY URLS:", len(urls))
 
             if not urls:
                 # Explicitly finish when no rows are discoverable instead of silently creating empty CSV.
                 print("No company URLs found on the Sales Navigator page.")
+                job.status = "failed"
+                db.commit()
+                context.close()
+                return
 
             with ThreadPoolExecutor(max_workers=3) as executor:
                 futures = [executor.submit(scrape_single, context, url) for url in urls]
