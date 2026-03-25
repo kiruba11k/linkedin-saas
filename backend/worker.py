@@ -2,10 +2,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import os
 import random
 import re
+import shutil
 import time
 from urllib.parse import urljoin, urlparse, parse_qs, unquote
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from database import SessionLocal
 from extractor import extract_company
@@ -38,6 +39,16 @@ def human_scroll(page, loops=1):
     for _ in range(loops):
         page.mouse.wheel(0, random.randint(800, 2400))
         time.sleep(random.uniform(0.8, 2.2))
+
+
+def wait_for_stable_page(page, timeout_ms=15000):
+    """Best-effort load stabilization for pages that keep long polling connections open."""
+    try:
+        page.wait_for_load_state("networkidle", timeout=timeout_ms)
+    except PlaywrightTimeoutError:
+        # LinkedIn pages often keep background requests open, so this can time out
+        # even when the page is ready for parsing.
+        pass
 
 
 def normalize_linkedin_company_url(raw_url: str):
@@ -128,7 +139,7 @@ def scrape_single(context, url):
         apply_stealth(page)
 
         page.goto(url, timeout=60000, wait_until="domcontentloaded")
-        page.wait_for_load_state("networkidle")
+        wait_for_stable_page(page)
 
         human_scroll(page, loops=2)
         human_delay()
@@ -160,11 +171,13 @@ def run_scraper(job_id, sales_nav_url):
     job.status = "running"
     db.commit()
 
+    session_dir = os.path.join("./session", job_id)
+
     try:
         with sync_playwright() as p:
 
             context = p.chromium.launch_persistent_context(
-                "./session",
+                session_dir,
                 headless=os.getenv("PLAYWRIGHT_HEADLESS", "true").lower() == "true",
                 args=["--disable-blink-features=AutomationControlled"],
             )
@@ -173,7 +186,7 @@ def run_scraper(job_id, sales_nav_url):
             apply_stealth(page)
 
             page.goto(sales_nav_url, timeout=90000, wait_until="domcontentloaded")
-            page.wait_for_load_state("networkidle")
+            wait_for_stable_page(page, timeout_ms=20000)
             page.wait_for_timeout(5000)
 
             human_scroll(page, loops=2)
@@ -189,7 +202,12 @@ def run_scraper(job_id, sales_nav_url):
                 futures = [executor.submit(scrape_single, context, url) for url in urls]
 
                 for future in as_completed(futures):
-                    result = future.result()
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        print(f"ERROR collecting scrape result: {exc}")
+                        continue
+
                     if result:
                         db.add(Company(job_id=job_id, **result))
                         db.commit()
@@ -203,4 +221,5 @@ def run_scraper(job_id, sales_nav_url):
         job.status = "failed"
         db.commit()
     finally:
+        shutil.rmtree(session_dir, ignore_errors=True)
         db.close()
